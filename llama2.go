@@ -327,14 +327,15 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 		for h := 0; h < int(p.NHeads); h++ {
 			h := h
 			go func() {
+				hhs := h * headSize
 				// get the query vector for this head
-				q := s.Q[h*headSize:]
+				q := s.Q[hhs:]
 				// attention scores for this head
 				att := s.Att[h*int(p.SeqLen):]
 				// iterate over all timesteps, including the current one
 				for t := 0; t <= pos; t++ {
 					// get the key vector for this head and at this timestep
-					k := s.KeyCache[loff+t*dim+h*headSize:]
+					k := s.KeyCache[loff+t*dim+hhs:]
 					// calculate the attention score as the dot product of q and k
 					var score float32
 					for i := 0; i < headSize; i++ {
@@ -349,12 +350,16 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 				Softmax(att[:pos+1])
 
 				// weighted sum of the values, store back into xb
-				for i := 0; i < headSize; i++ {
-					var val float32
-					for t := 0; t <= pos; t++ {
-						val += att[t] * s.ValueCache[loff+t*dim+h*headSize+i] // note bad locality
+				xb := s.Xb[hhs : hhs+headSize]
+				for i := range xb {
+					xb[i] = 0.0
+				}
+				for t := 0; t <= pos; t++ {
+					v := s.ValueCache[loff+t*dim+hhs : loff+t*dim+hhs+headSize]
+					a := att[t]
+					for i := range v {
+						xb[i] += a * v[i]
 					}
-					s.Xb[h*headSize+i] = val
 				}
 				wg.Done()
 			}()
@@ -481,7 +486,7 @@ func matmul(xout, x, w []float32, d int) {
 
 func accum(a, b []float32) {
 	_ = a[len(a)-1]
-	_ = b[len(a)-1]
+	_ = b[len(a)-1] // bce
 	for i := range a {
 		a[i] += b[i]
 	}
