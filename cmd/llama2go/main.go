@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/saracen/llama2.go"
@@ -15,6 +16,8 @@ func main() {
 		temperatureArg = flag.Float64("temperature", 0.9, "temperature for sampling")
 		stepsArg       = flag.Int64("steps", 256, "max number of steps to run for, 0: use seq_len")
 		promptArg      = flag.String("prompt", "", "prompt")
+
+		cpuprofileArg = flag.String("cpuprofile", "", "write cpu profile to file")
 	)
 	{
 		flag.Usage = func() {
@@ -26,19 +29,29 @@ func main() {
 		}
 	}
 
+	if *cpuprofileArg != "" {
+		f, err := os.Create(*cpuprofileArg)
+		if err != nil {
+			exit("Creating CPU Profile:", err)
+		}
+		defer f.Close() // error handling omitted for example
+		if err := pprof.StartCPUProfile(f); err != nil {
+			exit("Starting CPU Profile:", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
+
 	// read model.bin
 	checkpoint, err := llama2.LoadCheckpoint(flag.Arg(0))
 	if err != nil {
-		fmt.Println("loading checkpoint:", err)
-		os.Exit(1)
+		exit("Loading checkpoint:", err)
 	}
 	defer checkpoint.Close()
 
 	// read tokenizer.bin
 	vocab, err := llama2.LoadTokenizer("tokenizer.bin", int(checkpoint.Config.VocabSize))
 	if err != nil {
-		fmt.Println("Failed to load tokenizer.bin:", err)
-		os.Exit(1)
+		exit("Failed to load tokenizer.bin:", err)
 	}
 
 	var (
@@ -57,8 +70,7 @@ func main() {
 	if *promptArg != "" {
 		promptTokens, err = vocab.BPEEncode(*promptArg)
 		if err != nil {
-			fmt.Println("Encoding prompt:", err)
-			os.Exit(1)
+			exit("Encoding prompt:", err)
 		}
 	}
 
@@ -104,4 +116,9 @@ func main() {
 
 	// report achieved tok/s
 	fmt.Printf("achieved tok/s: %f\n", float64(steps-1)/time.Since(start).Seconds())
+}
+
+func exit(msg string, err error) {
+	fmt.Println(msg, err)
+	os.Exit(1)
 }

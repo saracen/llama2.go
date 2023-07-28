@@ -7,10 +7,13 @@ import (
 	"io"
 	"math"
 	"os"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
 )
+
+var matmulConcurrency = runtime.GOMAXPROCS(0) * 2
 
 type Checkpoint struct {
 	f    *os.File
@@ -440,24 +443,40 @@ func Softmax(x []float32) {
 }
 
 func matmul(xout, x, w []float32, d int) {
-	_ = xout[d-1]
-	n := len(x)
+	// Use a WaitGroup to wait for all goroutines to finish.
+	var wg sync.WaitGroup
+	wg.Add(matmulConcurrency)
 
-	for i := 0; i < d; i++ {
-		var val float32
-		in := i * n
-
-		for j := 0; j < n-4; j += 4 {
-			w := w[in+j : in+j+4]
-			x := x[j : j+4]
-
-			val += w[0] * x[0]
-			val += w[1] * x[1]
-			val += w[2] * x[2]
-			val += w[3] * x[3]
+	rowsPerThread := d / matmulConcurrency
+	for thread := 0; thread < matmulConcurrency; thread++ {
+		start := thread * rowsPerThread
+		end := start + rowsPerThread
+		if thread == matmulConcurrency-1 {
+			end = d
 		}
-		xout[i] = val
+
+		go func(start, end int) {
+			n := len(x)
+			for i := start; i < end; i++ {
+				var val float32
+				in := i * n
+
+				for j := 0; j < n-4; j += 4 {
+					w := w[in+j : in+j+4]
+					x := x[j : j+4] // bce
+
+					val += w[0] * x[0]
+					val += w[1] * x[1]
+					val += w[2] * x[2]
+					val += w[3] * x[3]
+				}
+				xout[i] = val
+			}
+			wg.Done()
+		}(start, end)
 	}
+
+	wg.Wait()
 }
 
 func accum(a, b []float32) {
