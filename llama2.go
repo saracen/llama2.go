@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"os"
 	"sync"
 	"syscall"
@@ -379,8 +378,8 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 	matmul(s.Logits, x, w.Wcls, int(p.VocabSize))
 }
 
-func Sample(rnd rand.Source, probabilities []float32) int {
-	r := float32(rnd.Int63()) / (1 << 63)
+func Sample(seed uint64, probabilities []float32) int {
+	r := randomF32(seed)
 	var cdf float32
 	for i, p := range probabilities {
 		cdf += p
@@ -401,4 +400,16 @@ func Argmax(v []float32) int {
 		}
 	}
 	return maxI
+}
+
+func randomU32(seed uint64) uint32 {
+	// xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
+	seed ^= seed >> 12
+	seed ^= seed << 25
+	seed ^= seed >> 27
+	return uint32((seed * 0x2545F4914F6CDD1D) >> 32)
+}
+
+func randomF32(seed uint64) float32 { // random float32 in [0,1)
+	return float32(randomU32(seed)>>8) / 16777216.0
 }

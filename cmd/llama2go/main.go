@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math/rand"
 	"os"
 	"time"
 
@@ -48,7 +47,7 @@ func main() {
 		steps       = int(*stepsArg)
 		start       = time.Now()
 		state       = llama2.NewRunState(checkpoint.Config)
-		rnd         = rand.NewSource(time.Now().Unix())
+		seed        = uint64(time.Now().Unix())
 	)
 	if steps <= 0 || steps > int(checkpoint.Config.SeqLen) {
 		steps = int(checkpoint.Config.SeqLen)
@@ -71,7 +70,7 @@ func main() {
 			// apply softmax to the logits to get the probabilities for next token
 			llama2.Softmax(state.Logits)
 			// we now want to sample from this distribution to get the next token
-			next = llama2.Sample(rnd, state.Logits)
+			next = llama2.Sample(seed, state.Logits)
 		}
 		fmt.Print(vocab[next])
 
