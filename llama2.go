@@ -228,8 +228,9 @@ func Softmax(x []float32) {
 	}
 }
 
-func matmul(xout, x, w []float32, n, d int) {
+func matmul(xout, x, w []float32, d int) {
 	_ = xout[d-1]
+	n := len(x)
 
 	for i := 0; i < d; i++ {
 		var val float32
@@ -258,7 +259,7 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 	headSize := dim / int(p.NHeads)
 
 	// copy the token embedding into x
-	copy(x, w.TokenEmbeddingTable[token*dim:])
+	copy(x, w.TokenEmbeddingTable[token*dim:(token+1)*dim])
 
 	// pluck out the "pos" row of freq_cis_real and freq_cis_imag
 	freqCisRealRow := w.FreqCisReal[pos*headSize/2:]
@@ -271,9 +272,9 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 
 		// qkv matmuls for this position
 		wg.Add(3)
-		go func() { matmul(s.Q, s.Xb, w.Wq[l*dim*dim:], dim, dim); wg.Done() }()
-		go func() { matmul(s.K, s.Xb, w.Wk[l*dim*dim:], dim, dim); wg.Done() }()
-		go func() { matmul(s.V, s.Xb, w.Wv[l*dim*dim:], dim, dim); wg.Done() }()
+		go func() { matmul(s.Q, s.Xb, w.Wq[l*dim*dim:], dim); wg.Done() }()
+		go func() { matmul(s.K, s.Xb, w.Wk[l*dim*dim:], dim); wg.Done() }()
+		go func() { matmul(s.V, s.Xb, w.Wv[l*dim*dim:], dim); wg.Done() }()
 		wg.Wait()
 
 		// apply RoPE rotation to the q and k vectors for each head
@@ -329,11 +330,11 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 
 				// weighted sum of the values, store back into xb
 				for i := 0; i < headSize; i++ {
-					val := 0.0
+					var val float32
 					for t := 0; t <= pos; t++ {
-						val += float64(att[t] * s.ValueCache[loff+t*dim+h*headSize+i]) // note bad locality
+						val += att[t] * s.ValueCache[loff+t*dim+h*headSize+i] // note bad locality
 					}
-					s.Xb[h*headSize+i] = float32(val)
+					s.Xb[h*headSize+i] = val
 				}
 				wg.Done()
 			}()
@@ -341,7 +342,7 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 		wg.Wait()
 
 		// final matmul to get the output of the attention
-		matmul(s.Xb2, s.Xb, w.Wo[l*dim*dim:], dim, dim)
+		matmul(s.Xb2, s.Xb, w.Wo[l*dim*dim:], dim)
 
 		// residual connection back into x
 		accum(x, s.Xb2)
@@ -350,8 +351,8 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 		rmsnorm(s.Xb, x, w.RmsFfnWeight[l*dim:])
 
 		wg.Add(2)
-		go func() { matmul(s.Hb, s.Xb, w.W1[l*dim*hiddenDim:], dim, hiddenDim); wg.Done() }()
-		go func() { matmul(s.Hb2, s.Xb, w.W3[l*dim*hiddenDim:], dim, hiddenDim); wg.Done() }()
+		go func() { matmul(s.Hb, s.Xb, w.W1[l*dim*hiddenDim:], hiddenDim); wg.Done() }()
+		go func() { matmul(s.Hb2, s.Xb, w.W3[l*dim*hiddenDim:], hiddenDim); wg.Done() }()
 		wg.Wait()
 
 		// F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
@@ -365,7 +366,7 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 		}
 
 		// final matmul to get the output of the ffn
-		matmul(s.Xb, s.Hb, w.W2[l*dim*hiddenDim:], hiddenDim, dim)
+		matmul(s.Xb, s.Hb, w.W2[l*dim*hiddenDim:], dim)
 
 		// residual connection
 		accum(x, s.Xb)
@@ -375,7 +376,7 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 	rmsnorm(x, x, w.RmsFinalWeight)
 
 	// classifier into logits
-	matmul(s.Logits, x, w.Wcls, int(p.Dim), int(p.VocabSize))
+	matmul(s.Logits, x, w.Wcls, int(p.VocabSize))
 }
 
 func Sample(rnd rand.Source, probabilities []float32) int {
