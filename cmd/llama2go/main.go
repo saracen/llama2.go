@@ -21,6 +21,7 @@ func main() {
 	)
 	{
 		flag.Usage = func() {
+			fmt.Fprintf(flag.CommandLine.Output(), "llama2go: <checkpoint>\n")
 			flag.PrintDefaults()
 		}
 		flag.Parse()
