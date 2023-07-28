@@ -140,28 +140,110 @@ func (c *Checkpoint) Close() {
 	c.f.Close()
 }
 
-func LoadTokenizer(pathname string, size int) ([]string, error) {
-	vocab := make([]string, size)
+type Vocab struct {
+	strings []string
+	scores  []float32
+
+	maxTokenLength int32
+}
+
+func (v Vocab) id(s string) int {
+	for idx, v := range v.strings {
+		if v == s {
+			return idx
+		}
+	}
+
+	return -1
+}
+
+func (v Vocab) String(id int) string {
+	return v.strings[id]
+}
+
+func (v Vocab) BPEEncode(text string) ([]int, error) {
+	tokens := make([]int, 0, v.maxTokenLength)
+
+	// first encode every individual byte in the input string
+	for _, b := range []byte(text) {
+		id := v.id(string(b))
+		if id == -1 {
+			return nil, fmt.Errorf("not good")
+		}
+
+		tokens = append(tokens, id)
+	}
+
+	// merge the best consecutive pair each iteration, according the scores in vocab_scores
+	for {
+		bestScore := float32(-1e10)
+		bestId := -1
+		bestIdx := -1
+
+		for i := 0; i < len(tokens)-1; i++ {
+			// check if we can merge the pair (tokens[i], tokens[i+1])
+			id := v.id(v.String(tokens[i]) + v.String(tokens[i+1]))
+			if id == -1 {
+				continue
+			}
+
+			if v.scores[id] > bestScore {
+				bestScore = v.scores[id]
+				bestId = id
+				bestIdx = i
+			}
+		}
+
+		if bestIdx == -1 {
+			break // we couldn't find any more pairs to merge, so we're done
+		}
+
+		// merge the consecutive pair (best_idx, best_idx+1) into new token best_id
+		tokens[bestIdx] = bestId
+
+		// delete token at position best_idx+1, shift the entire sequence back 1
+		for i := bestIdx + 1; i < len(tokens)-1; i++ {
+			tokens[i] = tokens[i+1]
+		}
+		tokens = tokens[:len(tokens)-1]
+	}
+
+	return tokens, nil
+}
+
+func LoadTokenizer(pathname string, size int) (Vocab, error) {
+	vocab := Vocab{
+		strings: make([]string, size),
+		scores:  make([]float32, size),
+	}
 
 	f, err := os.Open(pathname)
 	if err != nil {
-		return nil, fmt.Errorf("loading tokenizer file: %w", err)
+		return vocab, fmt.Errorf("loading tokenizer file: %w", err)
 	}
 	defer f.Close()
 
 	r := bufio.NewReader(f)
 
+	if err := binary.Read(r, binary.LittleEndian, &vocab.maxTokenLength); err != nil {
+		return vocab, fmt.Errorf("reading max token length: %w", err)
+	}
+
 	for i := 0; i < size; i++ {
+		if err := binary.Read(r, binary.LittleEndian, &vocab.scores[i]); err != nil {
+			return vocab, fmt.Errorf("reading vocab scores: %w", err)
+		}
+
 		var len int32
 		if err := binary.Read(r, binary.LittleEndian, &len); err != nil {
-			return nil, fmt.Errorf("reading length: %w", err)
+			return vocab, fmt.Errorf("reading length: %w", err)
 		}
 
 		data := make([]byte, len)
 		if _, err := io.ReadFull(r, data); err != nil {
-			return nil, fmt.Errorf("reading data: %w", err)
+			return vocab, fmt.Errorf("reading data: %w", err)
 		}
-		vocab[i] = string(data)
+		vocab.strings[i] = string(data)
 	}
 
 	return vocab, nil
@@ -181,70 +263,6 @@ func NewRunState(config *Config) *RunState {
 		Logits:     make([]float32, config.VocabSize),
 		KeyCache:   make([]float32, config.NLayers*config.SeqLen*config.Dim),
 		ValueCache: make([]float32, config.NLayers*config.SeqLen*config.Dim),
-	}
-}
-
-func accum(a, b []float32) {
-	_ = a[len(a)-1]
-	_ = b[len(a)-1]
-	for i := range a {
-		a[i] += b[i]
-	}
-}
-
-func rmsnorm(o, x, weight []float32) {
-	var ss float32
-	for _, v := range x {
-		ss += v * v
-	}
-	ss /= float32(len(x))
-	ss += 1e-5
-	ss = 1.0 / float32(math.Sqrt(float64(ss)))
-
-	_ = weight[len(o)-1]
-	_ = x[len(o)-1]
-	for j := range o {
-		o[j] = weight[j] * ss * x[j]
-	}
-}
-
-func Softmax(x []float32) {
-	maxVal := x[0]
-	for _, v := range x[1:] {
-		if v > maxVal {
-			maxVal = v
-		}
-	}
-
-	var sum float32
-	for i, v := range x {
-		x[i] = float32(math.Exp(float64(v - maxVal)))
-		sum += x[i]
-	}
-
-	for i := range x {
-		x[i] /= sum
-	}
-}
-
-func matmul(xout, x, w []float32, d int) {
-	_ = xout[d-1]
-	n := len(x)
-
-	for i := 0; i < d; i++ {
-		var val float32
-		in := i * n
-
-		for j := 0; j < n-4; j += 4 {
-			w := w[in+j : in+j+4]
-			x := x[j : j+4]
-
-			val += w[0] * x[0]
-			val += w[1] * x[1]
-			val += w[2] * x[2]
-			val += w[3] * x[3]
-		}
-		xout[i] = val
 	}
 }
 
@@ -400,6 +418,70 @@ func Argmax(v []float32) int {
 		}
 	}
 	return maxI
+}
+
+func Softmax(x []float32) {
+	maxVal := x[0]
+	for _, v := range x[1:] {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+
+	var sum float32
+	for i, v := range x {
+		x[i] = float32(math.Exp(float64(v - maxVal)))
+		sum += x[i]
+	}
+
+	for i := range x {
+		x[i] /= sum
+	}
+}
+
+func matmul(xout, x, w []float32, d int) {
+	_ = xout[d-1]
+	n := len(x)
+
+	for i := 0; i < d; i++ {
+		var val float32
+		in := i * n
+
+		for j := 0; j < n-4; j += 4 {
+			w := w[in+j : in+j+4]
+			x := x[j : j+4]
+
+			val += w[0] * x[0]
+			val += w[1] * x[1]
+			val += w[2] * x[2]
+			val += w[3] * x[3]
+		}
+		xout[i] = val
+	}
+}
+
+func accum(a, b []float32) {
+	_ = a[len(a)-1]
+	_ = b[len(a)-1]
+	for i := range a {
+		a[i] += b[i]
+	}
+}
+
+func rmsnorm(o, x, weight []float32) {
+	var ss float32
+	for _, v := range x {
+		ss += v * v
+	}
+	ss /= float32(len(x))
+	ss += 1e-5
+	ss = 1.0 / float32(math.Sqrt(float64(ss)))
+
+	_ = weight[len(o)-1]
+	_ = x[len(o)-1]
+	for j := range o {
+		o[j] = weight[j] * ss * x[j]
+	}
 }
 
 func randomU32(seed uint64) uint32 {

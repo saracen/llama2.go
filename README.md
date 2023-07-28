@@ -4,8 +4,8 @@ This is a Go port of [llama2.c](https://github.com/karpathy/llama2.c).
 
 ## Performance
 
-| model           | llama2.c         | llama2.go
-| --------------- | ---------------- | ---------
-| stories15M.bin  | 498.05447  tok/s | 70.359456 tok/s
-| stories42M.bin  | 191.473448 tok/s | 106.393798 tok/s
-| stories110M.bin | 95.522388  tok/s | 43.138391 tok/s
+| system                                    | model           | llama2.c         | llama2.go
+| ----------------------------------------- | --------------- | ---------------- |
+| MacBook Pro, Apple M1 Max, 10-Core, 32 GB | stories15M.bin  | 676.392573 tok/s | 73.702954 tok/s
+| MacBook Pro, Apple M1 Max, 10-Core, 32 GB | stories42M.bin  | 267.295597 tok/s | 27.107370 tok/s
+| MacBook Pro, Apple M1 Max, 10-Core, 32 GB | stories110M.bin | 100.671141 tok/s | 10.857624 tok/s
