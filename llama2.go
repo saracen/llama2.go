@@ -9,45 +9,46 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"syscall"
-	"unsafe"
 )
 
 var matmulConcurrency = runtime.GOMAXPROCS(0) * 2
 
-type Checkpoint struct {
-	f    *os.File
-	data []byte
-
-	Config             *Config
-	TransformerWeights *TransformerWeights
-}
-
 type Config struct {
-	Dim       int32
-	HiddenDim int32
-	NLayers   int32
-	NHeads    int32
-	NKvHeads  int32
-	VocabSize int32
-	SeqLen    int32
+	Dim       int
+	HiddenDim int
+	NLayers   int
+	NHeads    int
+	NKvHeads  int
+	VocabSize int
+	SeqLen    int
 }
 
-type TransformerWeights struct {
-	TokenEmbeddingTable []float32
-	RmsAttWeight        []float32
-	RmsFfnWeight        []float32
-	Wq                  []float32
-	Wk                  []float32
-	Wv                  []float32
-	Wo                  []float32
-	W1                  []float32
-	W2                  []float32
-	W3                  []float32
-	RmsFinalWeight      []float32
-	FreqCisReal         []float32
-	FreqCisImag         []float32
-	Wcls                []float32
+type Checkpoint interface {
+	Error() error
+	Close() error
+
+	Dim() int
+	HiddenDim() int
+	NLayers() int
+	NHeads() int
+	NKvHeads() int
+	VocabSize() int
+	SeqLen() int
+
+	TokenEmbeddingTable(token int) []float32
+	RmsAttWeight(layer int) []float32
+	RmsFfnWeight(layer int) []float32
+	Wq(layer int) []float32
+	Wk(layer int) []float32
+	Wv(layer int) []float32
+	Wo(layer int) []float32
+	W1(layer int) []float32
+	W2(layer int) []float32
+	W3(layer int) []float32
+	RmsFinalWeight() []float32
+	FreqCisReal(pos int) []float32
+	FreqCisImag(pos int) []float32
+	Wcls() []float32
 }
 
 type RunState struct {
@@ -63,84 +64,6 @@ type RunState struct {
 	Logits     []float32
 	KeyCache   []float32
 	ValueCache []float32
-}
-
-func LoadCheckpoint(pathname string) (c *Checkpoint, err error) {
-	f, err := os.Open(pathname)
-	if err != nil {
-		return nil, fmt.Errorf("loading checkpoint file: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			f.Close()
-		}
-	}()
-
-	config := &Config{}
-	if err := binary.Read(f, binary.LittleEndian, config); err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
-	}
-
-	sharedWeights := config.VocabSize > 0
-	if !sharedWeights {
-		config.VocabSize = -config.VocabSize
-	}
-
-	offset, err := f.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, fmt.Errorf("finding weight offset: %w", err)
-	}
-	size, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, fmt.Errorf("finding file size: %w", err)
-	}
-
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_PRIVATE)
-	if err != nil {
-		return nil, fmt.Errorf("mmap: %w", err)
-	}
-
-	floats := unsafe.Slice((*float32)(unsafe.Pointer(&data[offset])), len(data)-int(offset)/4)
-	off := 0
-	assign := func(size int32) []float32 {
-		field := floats[off : off+int(size)]
-		off += int(size)
-		return field
-	}
-
-	weights := &TransformerWeights{
-		TokenEmbeddingTable: assign(config.VocabSize * config.Dim),
-		RmsAttWeight:        assign(config.NLayers * config.Dim),
-		Wq:                  assign(config.NLayers * config.Dim * config.Dim),
-		Wk:                  assign(config.NLayers * config.Dim * config.Dim),
-		Wv:                  assign(config.NLayers * config.Dim * config.Dim),
-		Wo:                  assign(config.NLayers * config.Dim * config.Dim),
-		RmsFfnWeight:        assign(config.NLayers * config.Dim),
-		W1:                  assign(config.NLayers * config.HiddenDim * config.Dim),
-		W2:                  assign(config.NLayers * config.Dim * config.HiddenDim),
-		W3:                  assign(config.NLayers * config.HiddenDim * config.Dim),
-		RmsFinalWeight:      assign(config.Dim),
-		FreqCisReal:         assign(config.SeqLen * config.Dim / config.NHeads / 2),
-		FreqCisImag:         assign(config.SeqLen * config.Dim / config.NHeads / 2),
-	}
-
-	if sharedWeights {
-		weights.Wcls = weights.TokenEmbeddingTable
-	} else {
-		weights.Wcls = assign(config.VocabSize * config.Dim)
-	}
-
-	return &Checkpoint{
-		f:                  f,
-		data:               data,
-		Config:             config,
-		TransformerWeights: weights,
-	}, nil
-}
-
-func (c *Checkpoint) Close() {
-	syscall.Munmap(c.data)
-	c.f.Close()
 }
 
 type Vocab struct {
@@ -252,53 +175,56 @@ func LoadTokenizer(pathname string, size int) (Vocab, error) {
 	return vocab, nil
 }
 
-func NewRunState(config *Config) *RunState {
+func NewRunState(c Checkpoint) *RunState {
 	return &RunState{
-		X:          make([]float32, config.Dim),
-		Xb:         make([]float32, config.Dim),
-		Xb2:        make([]float32, config.Dim),
-		Hb:         make([]float32, config.HiddenDim),
-		Hb2:        make([]float32, config.HiddenDim),
-		Q:          make([]float32, config.Dim),
-		K:          make([]float32, config.Dim),
-		V:          make([]float32, config.Dim),
-		Att:        make([]float32, config.NHeads*config.SeqLen),
-		Logits:     make([]float32, config.VocabSize),
-		KeyCache:   make([]float32, config.NLayers*config.SeqLen*config.Dim),
-		ValueCache: make([]float32, config.NLayers*config.SeqLen*config.Dim),
+		X:          make([]float32, c.Dim()),
+		Xb:         make([]float32, c.Dim()),
+		Xb2:        make([]float32, c.Dim()),
+		Hb:         make([]float32, c.HiddenDim()),
+		Hb2:        make([]float32, c.HiddenDim()),
+		Q:          make([]float32, c.Dim()),
+		K:          make([]float32, c.Dim()),
+		V:          make([]float32, c.Dim()),
+		Att:        make([]float32, c.NHeads()*c.SeqLen()),
+		Logits:     make([]float32, c.VocabSize()),
+		KeyCache:   make([]float32, c.NLayers()*c.SeqLen()*c.Dim()),
+		ValueCache: make([]float32, c.NLayers()*c.SeqLen()*c.Dim()),
 	}
 }
 
-func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) {
+func Transformer(token, pos int, c Checkpoint, s *RunState) {
 	var wg sync.WaitGroup
 
-	// a few convenience variables
-	x := s.X
-	dim := int(p.Dim)
-	hiddenDim := int(p.HiddenDim)
-	headSize := dim / int(p.NHeads)
-
 	// copy the token embedding into x
-	copy(x, w.TokenEmbeddingTable[token*dim:(token+1)*dim])
+	copy(s.X, c.TokenEmbeddingTable(token))
 
 	// pluck out the "pos" row of freq_cis_real and freq_cis_imag
-	freqCisRealRow := w.FreqCisReal[pos*headSize/2:]
-	freqCisImagRow := w.FreqCisImag[pos*headSize/2:]
+	freqCisRealRow := c.FreqCisReal(pos)
+	freqCisImagRow := c.FreqCisImag(pos)
 
 	// forward all the layers
-	for l := 0; l < int(p.NLayers); l++ {
+	headSize := c.Dim() / c.NHeads()
+
+	if len(freqCisRealRow) < headSize/2 {
+		return
+	}
+	if len(freqCisImagRow) < headSize/2 {
+		return
+	}
+
+	for l := 0; l < c.NLayers(); l++ {
 		// attention rmsnorm
-		rmsnorm(s.Xb, x, w.RmsAttWeight[l*dim:])
+		rmsnorm(s.Xb, s.X, c.RmsAttWeight(l))
 
 		// qkv matmuls for this position
 		wg.Add(3)
-		go func() { matmul(s.Q, s.Xb, w.Wq[l*dim*dim:], dim); wg.Done() }()
-		go func() { matmul(s.K, s.Xb, w.Wk[l*dim*dim:], dim); wg.Done() }()
-		go func() { matmul(s.V, s.Xb, w.Wv[l*dim*dim:], dim); wg.Done() }()
+		go func() { matmul(s.Q, s.Xb, c.Wq(l)); wg.Done() }()
+		go func() { matmul(s.K, s.Xb, c.Wk(l)); wg.Done() }()
+		go func() { matmul(s.V, s.Xb, c.Wv(l)); wg.Done() }()
 		wg.Wait()
 
 		// apply RoPE rotation to the q and k vectors for each head
-		for h := 0; h < int(p.NHeads); h++ {
+		for h := 0; h < int(c.NHeads()); h++ {
 			// get the q and k vectors for this head
 			q := s.Q[h*headSize:]
 			k := s.K[h*headSize:]
@@ -318,24 +244,24 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 		}
 
 		// save key,value at this time step (pos) to our kv cache
-		loff := l * int(p.SeqLen) * dim // kv cache layer offset for convenience
-		copy(s.KeyCache[loff+pos*dim:], s.K[:dim])
-		copy(s.ValueCache[loff+pos*dim:], s.V[:dim])
+		loff := l * c.SeqLen() * c.Dim() // kv cache layer offset for convenience
+		copy(s.KeyCache[loff+pos*c.Dim():], s.K[:c.Dim()])
+		copy(s.ValueCache[loff+pos*c.Dim():], s.V[:c.Dim()])
 
 		// multihead attention. iterate over all heads
-		wg.Add(int(p.NHeads))
-		for h := 0; h < int(p.NHeads); h++ {
+		wg.Add(c.NHeads())
+		for h := 0; h < c.NHeads(); h++ {
 			h := h
 			go func() {
 				hhs := h * headSize
 				// get the query vector for this head
 				q := s.Q[hhs:]
 				// attention scores for this head
-				att := s.Att[h*int(p.SeqLen):]
+				att := s.Att[h*c.SeqLen():]
 				// iterate over all timesteps, including the current one
 				for t := 0; t <= pos; t++ {
 					// get the key vector for this head and at this timestep
-					k := s.KeyCache[loff+t*dim+hhs:]
+					k := s.KeyCache[loff+t*c.Dim()+hhs:]
 					// calculate the attention score as the dot product of q and k
 					var score float32
 					for i := 0; i < headSize; i++ {
@@ -355,7 +281,7 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 					xb[i] = 0.0
 				}
 				for t := 0; t <= pos; t++ {
-					v := s.ValueCache[loff+t*dim+hhs : loff+t*dim+hhs+headSize]
+					v := s.ValueCache[loff+t*c.Dim()+hhs : loff+t*c.Dim()+hhs+headSize]
 					a := att[t]
 					for i := range v {
 						xb[i] += a * v[i]
@@ -367,41 +293,41 @@ func Transformer(token, pos int, p *Config, s *RunState, w *TransformerWeights) 
 		wg.Wait()
 
 		// final matmul to get the output of the attention
-		matmul(s.Xb2, s.Xb, w.Wo[l*dim*dim:], dim)
+		matmul(s.Xb2, s.Xb, c.Wo(l))
 
 		// residual connection back into x
-		accum(x, s.Xb2)
+		accum(s.X, s.Xb2)
 
 		// ffn rmsnorm
-		rmsnorm(s.Xb, x, w.RmsFfnWeight[l*dim:])
+		rmsnorm(s.Xb, s.X, c.RmsFfnWeight(l))
 
 		wg.Add(2)
-		go func() { matmul(s.Hb, s.Xb, w.W1[l*dim*hiddenDim:], hiddenDim); wg.Done() }()
-		go func() { matmul(s.Hb2, s.Xb, w.W3[l*dim*hiddenDim:], hiddenDim); wg.Done() }()
+		go func() { matmul(s.Hb, s.Xb, c.W1(l)); wg.Done() }()
+		go func() { matmul(s.Hb2, s.Xb, c.W3(l)); wg.Done() }()
 		wg.Wait()
 
 		// F.silu; silu(x)=x*σ(x),where σ(x) is the logistic sigmoid
-		for i := 0; i < hiddenDim; i++ {
+		for i := 0; i < c.HiddenDim(); i++ {
 			s.Hb[i] = s.Hb[i] * (1.0 / (1.0 + float32(math.Exp(-float64(s.Hb[i])))))
 		}
 
 		// elementwise multiply with w3(x)
-		for i := 0; i < hiddenDim; i++ {
+		for i := 0; i < c.HiddenDim(); i++ {
 			s.Hb[i] = s.Hb[i] * s.Hb2[i]
 		}
 
 		// final matmul to get the output of the ffn
-		matmul(s.Xb, s.Hb, w.W2[l*dim*hiddenDim:], dim)
+		matmul(s.Xb, s.Hb, c.W2(l))
 
 		// residual connection
-		accum(x, s.Xb)
+		accum(s.X, s.Xb)
 	}
 
 	// final rmsnorm
-	rmsnorm(x, x, w.RmsFinalWeight)
+	rmsnorm(s.X, s.X, c.RmsFinalWeight())
 
 	// classifier into logits
-	matmul(s.Logits, x, w.Wcls, int(p.VocabSize))
+	matmul(s.Logits, s.X, c.Wcls())
 }
 
 func Sample(seed uint64, probabilities []float32) int {
@@ -437,8 +363,21 @@ func Softmax(x []float32) {
 	}
 
 	var sum float32
-	for i, v := range x {
-		x[i] = float32(math.Exp(float64(v - maxVal)))
+	var i int
+	for ; i < len(x)-4; i += 4 {
+		x[i] = float32(math.Exp(float64(x[i] - maxVal)))
+		x[i+1] = float32(math.Exp(float64(x[i+1] - maxVal)))
+		x[i+2] = float32(math.Exp(float64(x[i+2] - maxVal)))
+		x[i+3] = float32(math.Exp(float64(x[i+3] - maxVal)))
+
+		sum += x[i]
+		sum += x[i+1]
+		sum += x[i+2]
+		sum += x[i+3]
+	}
+
+	for ; i < len(x); i++ {
+		x[i] = float32(math.Exp(float64(x[i] - maxVal)))
 		sum += x[i]
 	}
 
@@ -447,26 +386,43 @@ func Softmax(x []float32) {
 	}
 }
 
-func matmul(xout, x, w []float32, d int) {
-	// Use a WaitGroup to wait for all goroutines to finish.
+func matmul(xout, x, w []float32) {
 	var wg sync.WaitGroup
 	wg.Add(matmulConcurrency)
 
-	rowsPerThread := d / matmulConcurrency
+	rowsPerThread := len(xout) / matmulConcurrency
 	for thread := 0; thread < matmulConcurrency; thread++ {
 		start := thread * rowsPerThread
 		end := start + rowsPerThread
 		if thread == matmulConcurrency-1 {
-			end = d
+			end = len(xout)
 		}
 
-		go func(start, end int) {
-			n := len(x)
-			for i := start; i < end; i++ {
-				var val float32
-				in := i * n
+		if end > len(xout) {
+			return
+		}
 
-				for j := 0; j < n-4; j += 4 {
+		go func(xout, w []float32) {
+			for i := range xout {
+				var val float32
+				in := i * len(x)
+
+				j := 0
+				for ; j < len(x)-8; j += 8 {
+					w := w[in+j : in+j+8]
+					x := x[j : j+8] // bce
+
+					val += w[0] * x[0]
+					val += w[1] * x[1]
+					val += w[2] * x[2]
+					val += w[3] * x[3]
+					val += w[4] * x[4]
+					val += w[5] * x[5]
+					val += w[6] * x[6]
+					val += w[7] * x[7]
+				}
+
+				for ; j < len(x)-4; j += 4 {
 					w := w[in+j : in+j+4]
 					x := x[j : j+4] // bce
 
@@ -475,19 +431,34 @@ func matmul(xout, x, w []float32, d int) {
 					val += w[2] * x[2]
 					val += w[3] * x[3]
 				}
+
+				for ; j < len(x); j++ {
+					val += w[in+j] * x[j]
+				}
+
 				xout[i] = val
 			}
 			wg.Done()
-		}(start, end)
+		}(xout[start:end], w[len(x)*start:len(x)*end])
 	}
 
 	wg.Wait()
 }
 
 func accum(a, b []float32) {
-	_ = a[len(a)-1]
-	_ = b[len(a)-1] // bce
-	for i := range a {
+	if len(a) != len(b) {
+		return
+	}
+
+	var i int
+	for ; i < len(a)-4; i += 4 {
+		a[i] += b[i]
+		a[i+1] += b[i+1]
+		a[i+2] += b[i+2]
+		a[i+3] += b[i+3]
+	}
+
+	for ; i < len(a); i++ {
 		a[i] += b[i]
 	}
 }
@@ -501,8 +472,9 @@ func rmsnorm(o, x, weight []float32) {
 	ss += 1e-5
 	ss = 1.0 / float32(math.Sqrt(float64(ss)))
 
-	_ = weight[len(o)-1]
-	_ = x[len(o)-1]
+	if len(x) != len(o) || len(weight) != len(o) {
+		return
+	}
 	for j := range o {
 		o[j] = weight[j] * ss * x[j]
 	}

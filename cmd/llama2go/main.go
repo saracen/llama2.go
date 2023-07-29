@@ -35,7 +35,8 @@ func main() {
 		if err != nil {
 			exit("Creating CPU Profile:", err)
 		}
-		defer f.Close() // error handling omitted for example
+		defer f.Close()
+
 		if err := pprof.StartCPUProfile(f); err != nil {
 			exit("Starting CPU Profile:", err)
 		}
@@ -43,14 +44,14 @@ func main() {
 	}
 
 	// read model.bin
-	checkpoint, err := llama2.LoadCheckpoint(flag.Arg(0))
+	checkpoint, err := llama2.NewMmapCheckpoint(flag.Arg(0))
 	if err != nil {
 		exit("Loading checkpoint:", err)
 	}
 	defer checkpoint.Close()
 
 	// read tokenizer.bin
-	vocab, err := llama2.LoadTokenizer("tokenizer.bin", int(checkpoint.Config.VocabSize))
+	vocab, err := llama2.LoadTokenizer("tokenizer.bin", checkpoint.VocabSize())
 	if err != nil {
 		exit("Failed to load tokenizer.bin:", err)
 	}
@@ -60,13 +61,13 @@ func main() {
 		token        = 1
 		temperature  = float32(*temperatureArg)
 		steps        = int(*stepsArg)
-		state        = llama2.NewRunState(checkpoint.Config)
+		state        = llama2.NewRunState(checkpoint)
 		seed         = uint64(time.Now().Unix())
 		start        time.Time
 		promptTokens []int
 	)
-	if steps <= 0 || steps > int(checkpoint.Config.SeqLen) {
-		steps = int(checkpoint.Config.SeqLen)
+	if steps <= 0 || steps > int(checkpoint.SeqLen()) {
+		steps = int(checkpoint.SeqLen())
 	}
 	if *promptArg != "" {
 		promptTokens, err = vocab.BPEEncode(*promptArg)
@@ -78,7 +79,7 @@ func main() {
 	fmt.Println("<s>") // explicit print the initial BOS token (=1), stylistically symmetric
 	for pos := 0; pos < steps; pos++ {
 		// forward the transformer to get logits for the next token
-		llama2.Transformer(token, pos, checkpoint.Config, state, checkpoint.TransformerWeights)
+		llama2.Transformer(token, pos, checkpoint, state)
 
 		if len(promptTokens) > 0 {
 			next = promptTokens[0]
@@ -90,7 +91,7 @@ func main() {
 				next = llama2.Argmax(state.Logits)
 			} else {
 				// apply the temperature to the logits
-				for q := 0; q < int(checkpoint.Config.VocabSize); q++ {
+				for q := 0; q < int(checkpoint.VocabSize()); q++ {
 					state.Logits[q] /= temperature
 				}
 				// apply softmax to the logits to get the probabilities for next token
@@ -111,6 +112,10 @@ func main() {
 		token = next
 		if pos == 0 {
 			start = time.Now()
+		}
+
+		if err := checkpoint.Error(); err != nil {
+			exit("Checkpoint error", err)
 		}
 	}
 	fmt.Println()
