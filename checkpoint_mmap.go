@@ -115,6 +115,8 @@ func NewMmapCheckpoint(pathname string) (*MmapCheckpoint, error) {
 
 	if !checkpoint.sharedWeights {
 		checkpoint.wcls = assign(checkpoint.vocabSize * checkpoint.dim)
+	} else {
+		checkpoint.wcls = checkpoint.tokenEmbeddingTable
 	}
 
 	checkpoint.f = f
@@ -215,8 +217,5 @@ func (c *MmapCheckpoint) FreqCisImag(pos int) []float32 {
 }
 
 func (c *MmapCheckpoint) Wcls() []float32 {
-	if c.sharedWeights {
-		return c.tokenEmbeddingTable[:c.vocabSize]
-	}
 	return c.wcls
 }
